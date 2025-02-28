@@ -2,40 +2,258 @@
 
 Photo gallery for self-hosted personal servers.
 
+## Cons
+- No TIFF support
+
 <br>
 
-- [Github repo](https://github.com/viktorstrate/photoview)
-
+---
+- [Github repo](https://github.com/photoview/photoview)
 
 ## docker-compose.yml
 ```yml
----
 services:
-  db:
-    image: mariadb
-    restart: unless-stopped
-    environment:
-      - MYSQL_DATABASE=photoview
-      - MYSQL_USER=photoview
-      - MYSQL_PASSWORD=photo-secret
-      - MYSQL_RANDOM_ROOT_PASSWORD=1
-    volumes:
-      - ./db:/var/lib/mysql
-
   photoview:
-    image: viktorstrate/photoview:latest
+    image: photoview/photoview:2
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    hostname: photoview
+    container_name: photoview
     restart: unless-stopped
+    stop_grace_period: 10s
     ports:
-      - "3090:80"
+      - "8008:80" ## HTTP port (host:container)
+    ## This ensures that DB is initialized and ready for connections.
+    ## Comment out the entire `depends_on` section if PHOTOVIEW_DATABASE_DRIVER is set to `sqlite` in the .env
+    ## Or comment out the `mariadb:` and uncomment the `postgres:` if PHOTOVIEW_DATABASE_DRIVER is set to `postgres`
     depends_on:
-      - db
+      # postgres:
+      mariadb:
+        condition: service_healthy
+    ## Security options for some restricted systems
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
     environment:
-      - PHOTOVIEW_DATABASE_DRIVER=mysql
-      - PHOTOVIEW_MYSQL_URL=photoview:photo-secret@tcp(db)/photoview
-      - PHOTOVIEW_LISTEN_IP=photoview
-      - PHOTOVIEW_LISTEN_PORT=80
-      - PHOTOVIEW_MEDIA_CACHE=/app/cache
+      PHOTOVIEW_DATABASE_DRIVER: ${PHOTOVIEW_DATABASE_DRIVER}
+      ## Comment out the next variable in the case PHOTOVIEW_DATABASE_DRIVER is set to `sqlite` or `postgres` in the .env
+      PHOTOVIEW_MYSQL_URL: "${MARIADB_USER}:${MARIADB_PASSWORD}@tcp(photoview-mariadb)/${MARIADB_DATABASE}"
+      ## Uncomment the next line if PHOTOVIEW_DATABASE_DRIVER is set to `sqlite` in the .env
+      # PHOTOVIEW_SQLITE_PATH: ${PHOTOVIEW_SQLITE_PATH}
+      ## Uncomment the next line if PHOTOVIEW_DATABASE_DRIVER is set to `postgres` in the .env
+      # PHOTOVIEW_POSTGRES_URL: postgres://${PGSQL_USER}:${PGSQL_PASSWORD}@photoview-pgsql:5432/${PGSQL_DATABASE}?sslmode=${PGSQL_SSL_MODE}
+      PHOTOVIEW_LISTEN_IP: "0.0.0.0"
+      ## Uncomment the next variable and set a different value to change the port photoview uses inside the container.
+      ## If you change this, remember to update the port mapping (under the `ports:`) above!
+      # PHOTOVIEW_LISTEN_PORT: 80
+      ## Uncomment the next variable and set a different value to set the location of the media cache inside the container.
+      ## If you change this, remember to update the right side of the storage volume mount (under the `volumes:`) below!
+      # PHOTOVIEW_MEDIA_CACHE: "/home/photoview/media-cache"
+      ## Optional: If you are using Samba/CIFS-Share and experience problems with "directory not found"
+      ## Enable the following Godebug
+      # - GODEBUG=asyncpreemptoff=1
+      ## Optional: To enable map related features, you need to create a mapbox token.
+      ## A token can be generated for free here https://account.mapbox.com/access-tokens/
+      ## It's a good idea to limit the scope of the token to your own domain, to prevent others from using it.
+      MAPBOX_TOKEN: ${MAPBOX_TOKEN}
+      ## If you want to use it, set the correct value in the .env file.
+      ## Support `qsv`, `vaapi`, `nvenc`.
+      ## Only `qsv` is verified with `/dev/dri` devices (see below `devices`).
+      PHOTOVIEW_VIDEO_HARDWARE_ACCELERATION: ${PHOTOVIEW_VIDEO_HARDWARE_ACCELERATION}
+    ## Share hardware devices with FFmpeg (optional):
+    # devices:
+      ## Uncomment next devices mappings if they are available in your host system
+      ## Intel QSV
+      # - "/dev/dri:/dev/dri"
+      ## Nvidia CUDA
+      # - "/dev/nvidia0:/dev/nvidia0"
+      # - "/dev/nvidiactl:/dev/nvidiactl"
+      # - "/dev/nvidia-modeset:/dev/nvidia-modeset"
+      # - "/dev/nvidia-nvswitchctl:/dev/nvidia-nvswitchctl"
+      # - "/dev/nvidia-uvm:/dev/nvidia-uvm"
+      # - "/dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools"
+      ## Video4Linux Video Encode Device (h264_v4l2m2m)
+      # - "/dev/video11:/dev/video11"
     volumes:
-      - ./cache:/app/cache
-      - ./photos:/photos:ro
+      ## Example:
+      ## - "/host/folder:/container/folder"
+      - "/etc/localtime:/etc/localtime:ro" ## use local time from host
+      - "/etc/timezone:/etc/timezone:ro"   ## use timezone from host
+      ## Uncomment the next line if PHOTOVIEW_DATABASE_DRIVER is set to `sqlite` in the .env
+      # - "${HOST_PHOTOVIEW_LOCATION}/database:/home/photoview/database"
+      - "${HOST_PHOTOVIEW_LOCATION}/storage:/home/photoview/media-cache"
+      ## Change This in the .env file: to the directory where your photos are located on your server.
+      ## You can mount multiple paths if your photos are spread across multiple directories.
+      ## The same path as the container path set here, you'll need to provide on the Photoview's init page (the one between the ':' chars).
+      ## If you mount several folders, provide the path to the parent one on the init page.
+      ## If you mount several folders, make sure that there are no direct mappings to the media root folder.
+      ## This means that you need to also modify the container path of the HOST_PHOTOVIEW_MEDIA_ROOT
+      ## to something like '/photos/main'. Note that this new name ('main' in this example) will become an album in Photoview.
+      - "${HOST_PHOTOVIEW_MEDIA_ROOT}:/photos:ro"
+      ## *Additional* media folders can be mounted like this (set the variable in .env file)
+      ## Note that a mount cannot be located in a subfolder of another mount.
+      # - "${HOST_PHOTOVIEW_MEDIA_FAMILY}:/photos/Family:ro"
+
+  ## Watchtower upgrades services automatically (optional)
+  watchtower:
+    image: containrrr/watchtower:latest
+    hostname: watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    environment:
+      ## Comment out the next variable if you want Watchtower to auto-update all containers, running on the host,
+      ## while now it will update only those with the label "com.centurylinklabs.watchtower.enable=true"
+      WATCHTOWER_LABEL_ENABLE: true
+      WATCHTOWER_CLEANUP: ${WATCHTOWER_CLEANUP}
+      WATCHTOWER_POLL_INTERVAL: ${WATCHTOWER_POLL_INTERVAL}
+      WATCHTOWER_TIMEOUT: ${WATCHTOWER_TIMEOUT}
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "~/.docker/config.json:/config.json:ro" ## optional, for authentication if you have a Docker Hub account
+      - "/etc/localtime:/etc/localtime:ro"      ## use local time from host
+      - "/etc/timezone:/etc/timezone:ro"        ## use timezone from host
+
+  ## Comment out the `mariadb` service if PHOTOVIEW_DATABASE_DRIVER is set to `sqlite` or `postgres` in the .env
+  mariadb:
+    image: mariadb:lts
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    hostname: photoview-mariadb
+    container_name: photoview-mariadb
+    restart: unless-stopped
+    stop_grace_period: 5s
+    ## Optimized MariaDB startup command for better performance and compatibility
+    command: mariadbd --innodb-buffer-pool-size=512M --transaction-isolation=READ-COMMITTED --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --max-connections=512 --innodb-rollback-on-timeout=OFF --innodb-lock-wait-timeout=120
+    security_opt: ## see https://github.com/MariaDB/mariadb-docker/issues/434#issuecomment-1136151239
+      - seccomp:unconfined
+      - apparmor:unconfined
+    ## Uncomment next 2 lines if you want to access the database directly
+    # ports:
+      # - "3306:3306"
+    environment:
+      MARIADB_AUTO_UPGRADE: "1"
+      MARIADB_DATABASE: ${MARIADB_DATABASE}
+      MARIADB_USER: ${MARIADB_USER}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+    volumes:
+      ## Example:
+      ## - "/host/folder:/container/folder"
+      - "/etc/localtime:/etc/localtime:ro" ## use local time from host
+      - "/etc/timezone:/etc/timezone:ro"   ## use timezone from host
+      - "${HOST_PHOTOVIEW_LOCATION}/database/mariadb:/var/lib/mysql" ## DO NOT REMOVE
+    healthcheck:
+      test: healthcheck.sh --connect --innodb_initialized
+      interval: 1m
+      timeout: 5s
+      retries: 5
+      start_period: 3m
+
+  ## Uncomment the `postgres` service if PHOTOVIEW_DATABASE_DRIVER is set to `postgres` in the .env
+#  postgres:
+#    image: postgres:16-alpine
+#    labels:
+#      - "com.centurylinklabs.watchtower.enable=true"
+#    hostname: photoview-pgsql
+#    container_name: photoview-pgsql
+#    restart: unless-stopped
+#    stop_grace_period: 5s
+#    ## Security options for some restricted systems
+#    security_opt:
+#      - seccomp:unconfined
+#      - apparmor:unconfined
+#    ## Uncomment next 2 lines if you want to access the database directly
+#    # ports:
+#      # - 5432:5432
+#    environment:
+#      POSTGRES_DB: ${PGSQL_DATABASE}
+#      POSTGRES_USER: ${PGSQL_USER}
+#      POSTGRES_PASSWORD: ${PGSQL_PASSWORD}
+#      ## See other optional variables in the https://hub.docker.com/_/postgres
+#    volumes:
+#      ## Example:
+#      ## - "/host/folder:/container/folder"
+#      - "/etc/localtime:/etc/localtime:ro" ## use local time from host
+#      - "/etc/timezone:/etc/timezone:ro"   ## use timezone from host
+#      - "${HOST_PHOTOVIEW_LOCATION}/database/postgres:/var/lib/postgresql/data" ## DO NOT REMOVE
+#    healthcheck:
+#      test: pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB
+#      interval: 1m
+#      timeout: 5s
+#      retries: 5
+#      start_period: 3m
+```
+## .env
+```
+##================***================##
+## These are the environment setup variables.
+## Start setting up your instance from here.
+## Syntax of the .env file is next:
+## VARIABLE_NAME=variable value with everything after the '=' and till the end of the line.
+## The variables with values, set in the docker-compose.yml directly, are for advanced configuration.
+##================***================##
+
+##----------Host variables-----------##
+## This is the current folder, where all Photoview files and folders (except of your media library) are located
+HOST_PHOTOVIEW_LOCATION=/opt/photoview
+
+## This is where your original photos and videos located.
+## Provide here the path to single root folder for your media collection.
+HOST_PHOTOVIEW_MEDIA_ROOT=/volume1/Photos
+## If you'd like to map multiple folders from different locations, create additional variables
+## here like the next one and modify the docker-compose.yml to match them and use in volume mappings.
+# HOST_PHOTOVIEW_MEDIA_FAMILY=/full/path/to/folder
+
+## This is where the Photoview data will be backed up
+HOST_PHOTOVIEW_BACKUP=/media/Backup/PhotoView
+##-----------------------------------##
+
+##-------Photoview variables---------##
+## PHOTOVIEW_DATABASE_DRIVER could have one of values: `mysql` (default), `sqlite`, `postgres`
+PHOTOVIEW_DATABASE_DRIVER=mysql
+
+## Optional: To enable map related features, you need to create a mapbox token.
+## A token can be generated for free here https://account.mapbox.com/access-tokens/
+## It's a good idea to limit the scope of the token to your own domain, to prevent others from using it.
+# MAPBOX_TOKEN=yourToken
+##-----------------------------------##
+
+##----------Video variables----------##
+## Set the hardware acceleration when encoding videos.
+## Support `qsv`, `vaapi`, `nvenc`.
+## Only `qsv` is verified with `/dev/dri` devices.
+# PHOTOVIEW_VIDEO_HARDWARE_ACCELERATION=
+##-----------------------------------##
+
+##--------MariaDB variables----------##
+## Comment out these variables if PHOTOVIEW_DATABASE_DRIVER is `sqlite` or `postgres`
+## Use password generator to generate secret values and replace these defaults
+MARIADB_DATABASE=photoview
+MARIADB_USER=photoview
+## Note: If your `MARIADB_PASSWORD` contains special characters (e.g. `@`), make sure to URL-encode them.
+MARIADB_PASSWORD=photosecret
+MARIADB_ROOT_PASSWORD=superphotosecret
+##-----------------------------------##
+
+##---------SQLite variables----------##
+## Uncomment the next line if PHOTOVIEW_DATABASE_DRIVER is `sqlite`
+# PHOTOVIEW_SQLITE_PATH=/home/photoview/database/photoview.db
+##-----------------------------------##
+
+##-------PostgreSQL variables--------##
+## Uncomment the next lines if PHOTOVIEW_DATABASE_DRIVER is `postgres`
+# PGSQL_DATABASE=photoview
+# PGSQL_USER=photoview
+## Note: If your `PGSQL_PASSWORD` contains special characters (e.g. `@`), make sure to URL-encode them.
+# PGSQL_PASSWORD=superphotosecret
+## See https://www.postgresql.org/docs/current/libpq-ssl.html for possible ssl modes
+# PGSQL_SSL_MODE=prefer
+##-----------------------------------##
+
+##-------Watchtower variables--------##
+## The POLL_INTERVAL in sec
+WATCHTOWER_POLL_INTERVAL=86400
+WATCHTOWER_TIMEOUT=30s
+WATCHTOWER_CLEANUP=true
+##\\\\\\\\\\\\\\\\\//////////////////##
 ```
